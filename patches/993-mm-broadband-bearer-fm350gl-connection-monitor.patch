@@ -1,0 +1,161 @@
+--- a/src/plugins/fm350gl/mm-broadband-bearer-fm350gl.c	2026-09-24 09:53:15.202914838 +0000
++++ b/src/plugins/fm350gl/mm-broadband-bearer-fm350gl.c	2026-09-24 09:53:15.204001385 +0000
+@@ -45,6 +45,9 @@
+ static void setup_cgev_disconnect_detection(MMBroadbandBearerFM350GL *self, MMPortSerialAt *primary);
+ static void teardown_cgev_disconnect_detection(MMBroadbandBearerFM350GL *self, MMPortSerialAt *primary);
+ static void fm350gl_cgev_disconnect_received(MMPortSerialAt *port, GMatchInfo *match_info, MMBroadbandBearerFM350GL *self);
++// Connection status monitoring (AT+CGACT? polling, missing-cid = disconnected)
++static void load_connection_status(MMBaseBearer *self, GAsyncReadyCallback callback, gpointer user_data);
++static MMBearerConnectionStatus load_connection_status_finish(MMBaseBearer *self, GAsyncResult *res, GError **error);
+ // Helpers
+ gboolean parse_ip(const gchar *res, MMBearerIpConfig *out_ip4_config, MMBearerIpConfig *out_ip6_config, GError **err);
+ GString *dectohexip(gchar *dezstring);
+@@ -130,11 +133,21 @@
+ mm_broadband_bearer_fm350gl_class_init(MMBroadbandBearerFM350GLClass *klass)
+ {
+   MMBroadbandBearerClass *c = MM_BROADBAND_BEARER_CLASS(klass);
++  MMBaseBearerClass *base_bearer_class = MM_BASE_BEARER_CLASS(klass);
++
+   c->dial_3gpp = dial_3gpp;
+   c->dial_3gpp_finish = dial_3gpp_finish;
+   c->get_ip_config_3gpp = get_ip_config_3gpp;
+   c->get_ip_config_3gpp_finish = get_ip_config_3gpp_finish;
+   c->disconnect_3gpp = disconnect_3gpp;
++
++  /* Override the generic AT+CGACT? polling monitor: on this modem a
++   * network-dropped context can disappear from the +CGACT? list entirely
++   * instead of being reported inactive, which the generic implementation
++   * treats as an unexpected error rather than a disconnect (see
++   * load_connection_status below for details). */
++  base_bearer_class->load_connection_status = load_connection_status;
++  base_bearer_class->load_connection_status_finish = load_connection_status_finish;
+ }
+ 
+ static void
+@@ -229,6 +242,126 @@
+   g_regex_unref(regex);
+ }
+ 
++/*
++ * Generic MMBroadbandBearer connection monitoring polls AT+CGACT? and
++ * looks for our own cid in the returned list. If the cid isn't present
++ * at all, the generic code treats that as an unexpected error
++ * ("PDP context not found in the known contexts list") and just logs a
++ * warning every poll, forever - it never reports a disconnection. On
++ * this modem a network-dropped session can disappear from the +CGACT?
++ * list entirely rather than showing up as inactive, so that "shouldn't
++ * happen" case is actually the normal disconnect signal here. This
++ * override treats a missing cid the same as an inactive one.
++ */
++static void
++load_connection_status_ready(MMBaseModem *modem,
++                             GAsyncResult *res,
++                             GTask *task)
++{
++  MMBroadbandBearerFM350GL *self;
++  const gchar *response;
++  GError *error = NULL;
++  GList *pdp_active_list = NULL;
++  GList *l;
++  MMBearerConnectionStatus status;
++  gint cid;
++
++  self = MM_BROADBAND_BEARER_FM350GL(g_task_get_source_object(task));
++
++  response = mm_base_modem_at_command_finish(modem, res, &error);
++  if (!response)
++  {
++    g_prefix_error(&error, "Couldn't check current list of active PDP contexts: ");
++    g_task_return_error(task, error);
++    g_object_unref(task);
++    return;
++  }
++
++  pdp_active_list = mm_3gpp_parse_cgact_read_response(response, &error);
++  if (error)
++  {
++    g_task_return_error(task, error);
++    g_object_unref(task);
++    return;
++  }
++
++  cid = mm_base_bearer_get_profile_id(MM_BASE_BEARER(self));
++
++  /* Default: cid not found in the list at all -> treat as disconnected,
++   * instead of the generic implementation's "shouldn't happen" error. */
++  status = MM_BEARER_CONNECTION_STATUS_DISCONNECTED;
++  for (l = pdp_active_list; l; l = g_list_next(l))
++  {
++    MM3gppPdpContextActive *pdp_active = (MM3gppPdpContextActive *)(l->data);
++    if (pdp_active->cid == (guint)cid)
++    {
++      status = (pdp_active->active ? MM_BEARER_CONNECTION_STATUS_CONNECTED
++                                    : MM_BEARER_CONNECTION_STATUS_DISCONNECTED);
++      break;
++    }
++  }
++  mm_3gpp_pdp_context_active_list_free(pdp_active_list);
++
++  g_task_return_int(task, (gssize)status);
++  g_object_unref(task);
++}
++
++static void
++load_connection_status(MMBaseBearer *self,
++                       GAsyncReadyCallback callback,
++                       gpointer user_data)
++{
++  GTask *task;
++  MMBaseModem *modem = NULL;
++  MMIfacePortAt *port;
++  gint cid;
++
++  task = g_task_new(self, NULL, callback, user_data);
++
++  cid = mm_base_bearer_get_profile_id(self);
++  if (cid == MM_3GPP_PROFILE_ID_UNKNOWN)
++  {
++    g_task_return_new_error(task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
++                            "Couldn't load connection status: cid not defined");
++    g_object_unref(task);
++    return;
++  }
++
++  g_object_get(self, MM_BASE_BEARER_MODEM, &modem, NULL);
++
++  port = mm_base_modem_peek_best_at_port(modem, NULL);
++  if (!port)
++  {
++    g_task_return_new_error(task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
++                            "Couldn't load connection status: no control port available");
++    g_object_unref(task);
++    g_object_unref(modem);
++    return;
++  }
++
++  mm_base_modem_at_command_full(modem, port, "+CGACT?", 3,
++                                FALSE, FALSE, NULL,
++                                (GAsyncReadyCallback)load_connection_status_ready, task);
++  g_object_unref(modem);
++}
++
++static MMBearerConnectionStatus
++load_connection_status_finish(MMBaseBearer *self,
++                              GAsyncResult *res,
++                              GError **error)
++{
++  GError *inner_error = NULL;
++  gssize value;
++
++  value = g_task_propagate_int(G_TASK(res), &inner_error);
++  if (inner_error)
++  {
++    g_propagate_error(error, inner_error);
++    return MM_BEARER_CONNECTION_STATUS_UNKNOWN;
++  }
++  return (MMBearerConnectionStatus)value;
++}
++
+ static void
+ dial_3gpp(MMBroadbandBearer *self,
+           MMBaseModem *m,

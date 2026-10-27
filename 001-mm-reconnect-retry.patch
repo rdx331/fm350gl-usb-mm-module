@@ -1,0 +1,54 @@
+--- /dev/null	2026-09-25 16:52:14.962653394 +0700
++++ b/files/usr/sbin/mm-reconnect-retry	2026-09-25 04:12:10.000000000 +0700
+@@ -0,0 +1,51 @@
++#!/bin/sh
++#
++# mm-reconnect-retry <ifname>
++#
++# ModemManager's connection.d dispatcher force-kills any hook script after
++# 5 seconds (MAX_CONNECTION_EXEC_TIME_SECS in mm-dispatcher.c), so
++# 10-report-down can only fire a single, unverified ifdown/ifup and must
++# return immediately. If that one attempt hits a transient modem error
++# (e.g. "Phone failure" right after MM re-enables the radio) there is
++# nothing left retrying it - the interface just sits down until netifd's
++# own much slower backoff eventually tries again, or until someone
++# manually intervenes.
++#
++# This script is launched detached (setsid, no inherited fds) from
++# 10-report-down, so it survives that 5-second kill and can actually
++# poll for success and retry for a couple of minutes on its own.
++
++CFG="$1"
++[ -n "$CFG" ] || exit 1
++
++MAX_ATTEMPTS=8       # give up after this many ifdown/ifup cycles
++POLL_INTERVAL=3       # seconds between ifstatus checks within one attempt
++POLL_TIMEOUT=30       # seconds to wait for "up" before trying again
++BACKOFF=5             # seconds to pause before the next attempt
++
++is_up() {
++    ifstatus "$CFG" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null
++}
++
++attempt=1
++while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
++    logger -t mm-reconnect "[$CFG] reconnect attempt $attempt/$MAX_ATTEMPTS"
++    ubus call network.interface down "{ \"interface\": \"$CFG\" }" >/dev/null 2>&1
++    ubus call network.interface up "{ \"interface\": \"$CFG\" }" >/dev/null 2>&1
++
++    waited=0
++    while [ "$waited" -lt "$POLL_TIMEOUT" ]; do
++        sleep "$POLL_INTERVAL"
++        waited=$((waited + POLL_INTERVAL))
++        if [ "$(is_up)" = "true" ]; then
++            logger -t mm-reconnect "[$CFG] reconnected on attempt $attempt"
++            exit 0
++        fi
++    done
++
++    attempt=$((attempt + 1))
++    sleep "$BACKOFF"
++done
++
++logger -t mm-reconnect "[$CFG] gave up reconnecting after $MAX_ATTEMPTS attempts"
++exit 1

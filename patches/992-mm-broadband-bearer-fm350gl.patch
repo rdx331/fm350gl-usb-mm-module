@@ -1,0 +1,114 @@
+--- a/src/plugins/fm350gl/mm-broadband-bearer-fm350gl.c	2026-09-23 22:36:13.947193422 +0000
++++ b/src/plugins/fm350gl/mm-broadband-bearer-fm350gl.c	2026-09-23 22:35:56.445577232 +0000
+@@ -31,6 +31,7 @@
+ 
+ #include "mm-base-modem-at.h"
+ #include "mm-log-object.h"
++#include "mm-port-serial-at.h"
+ 
+ #include "mm-broadband-bearer-fm350gl.h"
+ 
+@@ -40,6 +41,10 @@
+ static void get_ip_config_3gpp(MMBroadbandBearer *self, MMBroadbandModem *modem, MMPortSerialAt *primary, MMPortSerialAt *secondary, MMPort *data, guint cid, MMBearerIpFamily ip_family, GAsyncReadyCallback cb, gpointer userdata);
+ static gboolean get_ip_config_3gpp_finish(MMBroadbandBearer *self, GAsyncResult *r, MMBearerIpConfig **ipv4_config, MMBearerIpConfig **ipv6_config, GError **err);
+ static void disconnect_3gpp(MMBroadbandBearer *self, MMBroadbandModem *modem, MMPortSerialAt *primary, MMPortSerialAt *secondary, MMPort *data, guint cid, GAsyncReadyCallback cb, gpointer userdata);
++// Disconnect detection (network-initiated PDN deactivation)
++static void setup_cgev_disconnect_detection(MMBroadbandBearerFM350GL *self, MMPortSerialAt *primary);
++static void teardown_cgev_disconnect_detection(MMBroadbandBearerFM350GL *self, MMPortSerialAt *primary);
++static void fm350gl_cgev_disconnect_received(MMPortSerialAt *port, GMatchInfo *match_info, MMBroadbandBearerFM350GL *self);
+ // Helpers
+ gboolean parse_ip(const gchar *res, MMBearerIpConfig *out_ip4_config, MMBearerIpConfig *out_ip6_config, GError **err);
+ GString *dectohexip(gchar *dezstring);
+@@ -157,6 +162,73 @@
+   g_object_unref(t);
+ }
+ 
++/*
++ * The FM350-GL reports network-initiated session teardown as
++ * "+CGEV: EPS PDN DEACT", which is a Fibocom-specific variant not
++ * covered by the standard 3GPP +CGEV vocabulary ModemManager's generic
++ * broadband modem code parses (it only recognizes "NW PDN DEACT" /
++ * "ME PDN DEACT" and similar). Because of that, a disconnect on this
++ * modem was never reported up to the bearer, so nothing above
++ * ModemManager (netifd, NetworkManager, etc.) ever saw it happen and
++ * could redial. This handler is prepended on the primary port for the
++ * lifetime of the connection and reports the disconnection directly
++ * to this bearer as soon as the URC is seen, so upstream connection
++ * managers get a timely, correct "disconnected" signal to act on.
++ */
++static void
++fm350gl_cgev_disconnect_received(MMPortSerialAt *port,
++                                 GMatchInfo *match_info,
++                                 MMBroadbandBearerFM350GL *self)
++{
++  gchar *reason = g_match_info_fetch(match_info, 1);
++
++  mm_obj_msg(self, "network-initiated PDP deactivation detected (+CGEV: %s)",
++             reason ? reason : "unknown");
++  g_free(reason);
++
++  /* Avoid double-reporting if we're already tearing the bearer down
++   * ourselves (e.g. this URC arrives right as disconnect_3gpp runs). */
++  if (mm_base_bearer_get_status(MM_BASE_BEARER(self)) == MM_BEARER_STATUS_CONNECTED)
++  {
++    mm_base_bearer_report_connection_status(MM_BASE_BEARER(self),
++                                            MM_BEARER_CONNECTION_STATUS_DISCONNECTED);
++  }
++}
++
++static void
++setup_cgev_disconnect_detection(MMBroadbandBearerFM350GL *self,
++                                MMPortSerialAt *primary)
++{
++  GRegex *regex;
++
++  g_assert(primary != NULL);
++  regex = g_regex_new(
++      "\\r\\n\\+CGEV:\\s*((?:EPS|NW|ME) PDN DEACT)[^\\r\\n]*\\r\\n",
++      G_REGEX_RAW, 0, NULL);
++  mm_port_serial_at_add_unsolicited_msg_handler(
++      primary, regex,
++      (MMPortSerialAtUnsolicitedMsgFn)fm350gl_cgev_disconnect_received,
++      self, NULL);
++  g_regex_unref(regex);
++}
++
++static void
++teardown_cgev_disconnect_detection(MMBroadbandBearerFM350GL *self,
++                                   MMPortSerialAt *primary)
++{
++  GRegex *regex;
++
++  if (!primary)
++  {
++    return;
++  }
++  regex = g_regex_new(
++      "\\r\\n\\+CGEV:\\s*((?:EPS|NW|ME) PDN DEACT)[^\\r\\n]*\\r\\n",
++      G_REGEX_RAW, 0, NULL);
++  mm_port_serial_at_add_unsolicited_msg_handler(primary, regex, NULL, NULL, NULL);
++  g_regex_unref(regex);
++}
++
+ static void
+ dial_3gpp(MMBroadbandBearer *self,
+           MMBaseModem *m,
+@@ -173,6 +245,10 @@
+   GTask *t = g_task_new(self, cancellable, cb, userdata);
+   g_task_set_task_data(t, ctx, (GDestroyNotify)dial_3gpp_context_free);
+ 
++  /* Start watching for network-initiated deactivation as soon as we
++   * begin dialing, so we don't race a fast drop right after connect. */
++  setup_cgev_disconnect_detection(MM_BROADBAND_BEARER_FM350GL(self), primary);
++
+   gchar *cmd = g_strdup_printf("+CGACT=1,%d", cid);
+   mm_base_modem_at_command_full(
+       ctx->modem, ctx->primary, cmd,
+@@ -368,6 +444,7 @@
+                 gpointer userdata)
+ {
+   g_assert(primary != NULL);
++  teardown_cgev_disconnect_detection(MM_BROADBAND_BEARER_FM350GL(self), primary);
+   gchar *cmd = g_strdup_printf("+CGACT=0,%d", cid);
+   GTask *t = g_task_new(self, NULL, cb, userdata);
+   mm_obj_dbg(self, "sending PDP context deactivation in primary port...");

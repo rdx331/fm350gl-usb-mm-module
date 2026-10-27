@@ -1,0 +1,26 @@
+--- a/files/usr/lib/ModemManager/connection.d/10-report-down	2026-09-25 15:55:49.801580316 +0700
++++ b/files/usr/lib/ModemManager/connection.d/10-report-down	2026-09-25 04:12:10.000000000 +0700
+@@ -32,8 +32,10 @@
+ 
+ [ "${IFUP}" = "true" ] && {
+ 	mm_log "info" "Reconnecting '${CFG}' on '${STATE}' event"
+-	ubus call network.interface down "{ 'interface': '${CFG}'}"
+-	ubus call network.interface up "{ 'interface': '${CFG}'}"
++	# Launched detached (setsid, no inherited fds) so it survives
++	# ModemManager's 5-second kill of this hook - see mm-reconnect-retry
++	# for why a single ifdown/ifup here isn't enough on its own.
++	setsid /usr/sbin/mm-reconnect-retry "${CFG}" </dev/null >/dev/null 2>&1 &
+ }
+ 
+ exit 0
+
+--- a/Makefile	2026-09-25 16:59:25.811191459 +0700
++++ b/Makefile	2026-09-25 17:02:55.282689902 +0700
+@@ -117,6 +117,7 @@
+ 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/sbin/ModemManager $(1)/usr/sbin
+ 	$(INSTALL_BIN) ./files/usr/sbin/ModemManager-wrapper $(1)/usr/sbin
+ 	$(INSTALL_BIN) ./files/usr/sbin/ModemManager-monitor $(1)/usr/sbin
++	$(INSTALL_BIN) ./files/usr/sbin/mm-reconnect-retry $(1)/usr/sbin
+ 
+ 	$(INSTALL_DIR) $(1)/usr/bin
+ 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/mmcli $(1)/usr/bin
