@@ -1,6 +1,6 @@
 --- a/meson.build
 +++ b/meson.build
-@@ -357,6 +357,7 @@ plugins_options_reqs = {
+@@ -369,6 +369,7 @@ plugins_options_reqs = {
    'wavecom': {'available': true, 'shared': []},
    'x22x': {'available': true, 'shared': []},
    'zte': {'available': true, 'shared': ['icera']},
@@ -10,11 +10,12 @@
  plugins_shared = {}
 --- a/meson_options.txt
 +++ b/meson_options.txt
-@@ -102,3 +102,4 @@ option('gtk_doc', type: 'boolean', value
+@@ -80,3 +80,4 @@ option('gtk_doc', type: 'boolean', value: false, description: 'use gtk-doc to bu
  option('bash_completion', type: 'boolean', value: true, description: 'install bash completion files')
  
  option('fuzzer', type: 'boolean', value: false, description: 'build fuzzer tests')
 +option('plugin_fm350gl', type: 'feature', value: 'auto', description: 'enable fm350gl plugin support')
+new file mode 100644
 --- /dev/null
 +++ b/src/plugins/fm350gl/77-mm-fm350gl.rules
 @@ -0,0 +1,36 @@
@@ -54,6 +55,7 @@
 +GOTO="mm_fm350gl_port_types_end"
 +
 +LABEL="mm_fm350gl_port_types_end"
+new file mode 100644
 --- /dev/null
 +++ b/src/plugins/fm350gl/mm-broadband-bearer-fm350gl.c
 @@ -0,0 +1,472 @@
@@ -529,6 +531,7 @@
 +  mm_obj_info(NULL, "ipv6: %s", ipv6);
 +  return TRUE;
 +}
+new file mode 100644
 --- /dev/null
 +++ b/src/plugins/fm350gl/mm-broadband-bearer-fm350gl.h
 @@ -0,0 +1,76 @@
@@ -608,6 +611,7 @@
 +                                       GError **err);
 +
 +#endif /* MM_BROADBAND_BEARER_FM350GL_H */
+new file mode 100644
 --- /dev/null
 +++ b/src/plugins/fm350gl/mm-broadband-modem-fm350gl.c
 @@ -0,0 +1,757 @@
@@ -1368,6 +1372,7 @@
 +      MM_BASE_MODEM(m), primary, "Z0", 6, FALSE,
 +      FALSE, NULL, cb, userdata);
 +}
+new file mode 100644
 --- /dev/null
 +++ b/src/plugins/fm350gl/mm-broadband-modem-fm350gl.h
 @@ -0,0 +1,54 @@
@@ -1425,6 +1430,7 @@
 +                               guint16 pid);
 +
 +#endif /* MM_BROADBAND_MODEM_FM350GL_H */
+new file mode 100644
 --- /dev/null
 +++ b/src/plugins/fm350gl/mm-plugin-fm350gl.c
 @@ -0,0 +1,88 @@
@@ -1518,7 +1524,7 @@
 +}
 --- a/src/plugins/meson.build
 +++ b/src/plugins/meson.build
-@@ -697,6 +697,22 @@ if plugins_options['option']
+@@ -792,6 +792,22 @@ if plugins_options['option']
    }}
  endif
  
@@ -1543,7 +1549,7 @@
    sources = files(
 --- a/src/plugins/mm-builtin-plugins.c
 +++ b/src/plugins/mm-builtin-plugins.c
-@@ -109,6 +109,9 @@ MMPlugin *mm_plugin_create_samsung (void
+@@ -115,6 +115,9 @@ MMPlugin *mm_plugin_create_samsung (void);
  #if defined ENABLE_PLUGIN_SIERRA
  MMPlugin *mm_plugin_create_sierra (void);
  #endif
@@ -1553,7 +1559,7 @@
  #if defined ENABLE_PLUGIN_SIERRA_LEGACY
  MMPlugin *mm_plugin_create_sierra_legacy (void);
  #endif
-@@ -238,6 +241,9 @@ mm_builtin_plugins_load (void)
+@@ -253,6 +256,9 @@ mm_builtin_plugins_load (void)
  #if defined ENABLE_PLUGIN_SIERRA
      PREPEND_PLUGIN (sierra);
  #endif
